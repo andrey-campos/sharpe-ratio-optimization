@@ -1,1 +1,6 @@
-
+Numpy: 1.26.4
+Pandas: 2.2.0
+Scipy: 1.13.0
+yahoo finance: 0.2.41
+Matplotlib: 3.8.3
+Decimal: 1.70
