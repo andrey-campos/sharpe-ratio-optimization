@@ -6,7 +6,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from decimal import Decimal, getcontext
 from typing import Tuple
-
+from scipy.stats import entropy
+from tickers import retrieve_tickers
 
 """
 Maximizing the sharpe ratio to perform portfolio optimization:
@@ -26,17 +27,12 @@ Maximizing the sharpe ratio to perform portfolio optimization:
 """
 
 # 10 random possible stocks per sector
-sectors = {
-    "finance": ["BRK-B", "JPM", "BAC", "GS", "V", "MA", "BX", "MS", "PYPL", "BLK"],
-    "tech": ["NVDA", "MSFT", "AAPL", "ORCL", "ADBE", "UBER", "GOOG", "META", "CSCO", "ZM"],
-    "industrial": ["RTX", "GE", "CAT", "LMT", "UPS", "UNP", "BA", "HON", "GD", "ADP"],
-    "energy": ["XOM", "TXGE", "ET", "FANG", "OXY", "BKR", "MPC", "CQP", "HAL", "LNG"],
-}
+sectors = retrieve_tickers()
 
 class Portfolio():
     def __init__(self, num_stocks: int, start_date: str, end_date: str, 
         annual_rate: float, trading_days: int, one_minus_lambda: float,
-        upper_bound: float, lower_bound: float) -> dict:
+        entropy_lambda: float, upper_bound: float, lower_bound: float) -> dict:
         self.portfolio: dict = {
             "Finance": pd.DataFrame(),
             "Tech": pd.DataFrame(),
@@ -49,15 +45,15 @@ class Portfolio():
         self.annual_rate = annual_rate
         self.trading_days = trading_days
         self.num_stocks = num_stocks
-        self.upper_bound = upper_bound
-        self.lower_bound = lower_bound
         self.portfolio_expected_return: float = 0.0
         self.expected_returns_vector: list[float] = []
         self.one_minus_lambda = one_minus_lambda
+        self.entropy_lambda = entropy_lambda
+        self.lower_bounds = lower_bound
+        self.upper_bounds = upper_bound
+
         # initial stock weight as (1, 20) vector with equal intialization
         self.stock_weight: np.array =  np.full((1, 20), (1 / (len(self.portfolio) * self.num_stocks)))
-
-
 
     # pre-process stock data
     def prepare_data(self, sectors: dict, log_data=True) -> dict:   
@@ -231,26 +227,25 @@ class Portfolio():
         return_dataframe = pd.concat([returns_portfolio[keys] for keys in returns_portfolio.keys()])
         weights = return_dataframe["Stock_Percantage"].to_list()
         # use tuple comprehension to make bounds for scipy minimize, also choose maximum value for weight
-        bounds = tuple((self.lower_bound, self.upper_bound) for weight in range(len(weights)))
+        bounds = tuple((self.lower_bounds, self.upper_bounds) for weight in range(len(weights)))
         return bounds, weights
 
-    # calculate the annual sharpe ratio by annualizing return and volatility
-    def sharpe_ratio(self, weights: list[float], portfolio_vol: float,
-        negative_sharpe=False) -> float:
-       # Calculate portfolio return based on weights
+    # use annual sharpe ratio as objective
+    def sharpe_ratio(self,  weights: list[float], portfolio_vol: float,
+    optimize_sharpe=False) -> float:
+       # Calculate portfolio return based on weights and normalized entropy 
         portfolio_return = np.dot(weights, self.expected_returns_vector)
-        
+
         # Annualize return and volatility to match annual rate and get a annaul sharpe ratio
         annualized_return = portfolio_return * self.trading_days
         annualized_vol = portfolio_vol * np.sqrt(self.trading_days)
+
+        sharpe = (annualized_return - self.annual_rate) / (annualized_vol + self.entropy_lambda * (1 - entropy(weights)/np.log(len(weights))))
         
-        # Calculate Sharpe ratio
-        sharpe = (annualized_return - self.annual_rate) / annualized_vol
-        
-        # Make it negative for minimization if needed
-        if negative_sharpe: 
+        # Make it negative for minimization if needed..
+        if optimize_sharpe: 
             sharpe = -sharpe
-        return sharpe.item() 
+        return sharpe.item()
 
     # maximize sharpe ratio; with scipy minimize, bounds & set constraints; same arguments as sharpe ratio
     def maximize_sharpe(self, weights:list[float], 
@@ -261,7 +256,7 @@ class Portfolio():
             args=(portfolio_vol, True),
             bounds=bounds,
             method="SLSQP",
-            # No short selling; all weights summed must equal 1; at solution 
+            # No short selling & all weights summed must equal 1; at solution 
             constraints=[
                     {"type": "eq", "fun":  lambda weight: np.sum(weight) - 1},
                     {"type": "ineq", "fun": lambda weight: weight}
@@ -310,10 +305,9 @@ class Portfolio():
             plt.show()
 
 
-
 # important instance variables that will be used throughtout program
 portfolio = Portfolio(num_stocks=5, start_date="2022-8-8", end_date="2023-8-12", 
-    annual_rate=0.0327, trading_days=254, lower_bound=0.0, upper_bound=0.10,one_minus_lambda=0.04) 
+    annual_rate=0.0327, trading_days=254, lower_bound=0.01, upper_bound=0.10, one_minus_lambda=0.04, entropy_lambda=0.5) 
 
 # Shows assets data; returned as logs 
 assets = portfolio.prepare_data(sectors, log_data=True)
@@ -340,8 +334,8 @@ bounds, weights = portfolio.bounds(return_portfolio)
 print(f"\nthe bounds for optimization:\n{bounds, len(bounds)}\nThe list of weights/stock percantage per stock from return portfolio:\n{weights, len(weights)}\n\n")
 
 # Calculates the sharpe ratio per portfolio expected return, the annual rate, the voltality and amount of trading days
-sharpe_ratio = portfolio.sharpe_ratio(weights, portfolio_volatility, negative_sharpe=True)
-print(f"The negative (arg neg sharpe set True) of the sharpe ratio of the portfolio: {sharpe_ratio}\n")
+sharpe_ratio = portfolio.sharpe_ratio(weights, portfolio_volatility, optimize_sharpe=True)
+print(f"Regular sharpe ratio of portfolio: {sharpe_ratio}\n")
 
 # returns the optimized sharpe ratio and uses the negative sharpe ratio and list of weights / stock percantages:
 optimized_sharpe = portfolio.maximize_sharpe(weights, bounds, portfolio_volatility)
@@ -354,5 +348,5 @@ print(f"\nOld expected return portfolio: {return_portfolio}\nOld total expected 
 print(f"\n\nFinal metric: old sharpe ratio: {sharpe_ratio}\nNew sharpe ratio: {abs(optimized_sharpe.fun)}")
 
 # More visual aspects to compare metrics of unoptimized versus optimized portfolio:
-portfolio.asset_allocation(show_one_sector=True, input_portfolio=optimized_portfolio, sector="Tech")
-portfolio.correlation_heatmap(assets)
+portfolio.asset_allocation(show_one_sector=False)
+portfolio.correlation_heatmap(diversified_portfolio)
